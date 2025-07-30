@@ -2,7 +2,7 @@ name: Telegram News Trigger
 
 on:
   schedule:
-    - cron: '0 8 * * *' # Täglich um 08:00 UTC (= 10:00/11:00 MEZ/MESZ)
+    - cron: '0 8 * * *' # täglich um 8:00 UTC = 10/11 Uhr 🇩🇪
   workflow_dispatch:
 
 jobs:
