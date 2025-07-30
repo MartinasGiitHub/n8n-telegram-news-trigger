@@ -1,2 +1,13 @@
-- name: Trigger Telegram News Workflow
-  run: curl -X POST https://primary-production-7e351.up.railway.app/webhook-test/telegram-news
+name: Telegram News Trigger
+
+on:
+  schedule:
+    - cron: '0 8 * * *' # Täglich um 08:00 UTC (= 10:00/11:00 MEZ/MESZ)
+  workflow_dispatch:
+
+jobs:
+  trigger-n8n:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Telegram News Workflow
+        run: curl -X POST https://primary-production-7e351.up.railway.app/webhook-test/telegram-news
