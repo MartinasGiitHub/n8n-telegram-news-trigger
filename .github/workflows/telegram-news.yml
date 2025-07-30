@@ -1,14 +1,2 @@
-name: Trigger Telegram News via n8n
-
-on:
-  schedule:
-    - cron: '0 9 * * *'  # 09:00 UTC = 11:00 Berlin-Zeit
-  workflow_dispatch:
-
-jobs:
-  trigger-n8n-webhook:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Call n8n Webhook
-        run: |
-          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}"
+- name: Trigger Telegram News Workflow
+  run: curl -X POST https://primary-production-7e351.up.railway.app/webhook-test/telegram-news
