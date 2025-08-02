@@ -10,4 +10,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Telegram News Workflow
-        run: curl -X POST https://primary-production-7e351.up.railway.app/webhook-test/telegram-news
+        run: curl -X POST ${{ secrets.N8N_WEBHOOK_URL }}
