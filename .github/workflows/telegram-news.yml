@@ -1,56 +1,97 @@
-name: Telegram News (Actions only)
+name: Telegram AI News
 
 on:
   schedule:
-    - cron: '30 7 * * *'   # 09:30 Berlin ~ 07:30 UTC (Sommerzeit)
+    - cron: '0 8 * * *'   # täglich 08:00 UTC = 10/11 Uhr DE
   workflow_dispatch:
 
 jobs:
-  run:
+  send:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install feedparser
-      - name: Fetch RSS and post
+
+      # Persistenter Cache für Dublettenvermeidung über Läufe hinweg
+      - name: Restore cache
+        uses: actions/cache@v4
+        with:
+          path: .github/news_state
+          key: telegram-news-cache-v1
+
+      - name: Install deps
+        run: pip install feedparser requests
+
+      - name: Fetch & send
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python - <<'PY'
-          import os, pathlib, time, urllib.request, urllib.parse, feedparser
-          FEEDS = ["https://the-decoder.de/feed/"]  # ggf. weitere URLs hinzufügen
-          state = pathlib.Path(".state"); state.mkdir(exist_ok=True)
+          python - << 'PY'
+          import os, time, html, hashlib, pathlib
+          import requests, feedparser
 
-          def send(text):
-            payload = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text})
-            req = urllib.request.Request(
-              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-              data=payload.encode(), headers={"Content-Type":"application/x-www-form-urlencoded"}, method="POST")
-            urllib.request.urlopen(req, timeout=20).read()
+          FEEDS = [
+              "https://the-decoder.de/feed/",
+              "https://t3n.de/news/tag/ki/feed/",
+              "https://venturebeat.com/category/ai/feed/",
+              "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+              "https://arstechnica.com/ai/feed",
+              "https://ai.googleblog.com/feeds/posts/default",
+          ]
 
+          CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
+          TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
+          API_URL  = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+
+          state_dir = pathlib.Path(".github/news_state"); state_dir.mkdir(parents=True, exist_ok=True)
+          seen_file = state_dir / "seen_urls.txt"
+
+          # Gesehene URLs laden (für lauf-übergreifende Dublettenvermeidung)
+          seen = set()
+          if seen_file.exists():
+              for line in seen_file.read_text(encoding="utf-8").splitlines():
+                  if line.strip(): seen.add(line.strip())
+
+          new_seen = []
+
+          # Hilfsfunktionen
+          def norm_id(entry):
+              for k in ("id", "guid", "link"): 
+                  if k in entry: 
+                      return str(entry[k])
+              return (entry.get("title","") + "|" + entry.get("link","")).strip()
+
+          def send(title, link):
+              text = f"{html.escape(title)}\n{html.escape(link)}"
+              data = {"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True, "parse_mode": "HTML"}
+              resp = requests.post(API_URL, data=data, timeout=20)
+              resp.raise_for_status()
+
+          # Sammeln & Senden – dublettenfrei (über alle Feeds)
+          total_sent = 0
           for url in FEEDS:
-            key = pathlib.Path(url.replace("://","_").replace("/","_"))
-            sf = state / f"{key}.last"
-            last = sf.read_text().strip() if sf.exists() else None
-            d = feedparser.parse(url)
-            entries = sorted(d.entries, key=lambda e: e.get("published_parsed") or time.gmtime(0))
-            def eid(e): return e.get("id") or e.get("link")
-            new = [] if last else ([entries[-1]] if entries else [])
-            if last:
-              for e in entries:
-                if eid(e)==last: new=[]   # nur Elemente NACH last
-                else: new.append(e)
-            for e in new:
-              t, l = e.get("title","").strip(), e.get("link","").strip()
-              if t and l: send(f"{t}\n{l}")
-            if entries: sf.write_text(eid(entries[-1]) or "")
+              feed = feedparser.parse(url)
+              # Älteste zuerst, damit Reihenfolge „oben nach neu“ im Kanal stimmt
+              for entry in reversed(feed.entries[:10]):   # pro Feed die letzten 10 prüfen
+                  uid = norm_id(entry)
+                  link = entry.get("link") or ""
+                  if not link or uid in seen: 
+                      continue
+                  title = entry.get("title", "(ohne Titel)").strip()
+                  try:
+                      send(title, link)
+                      total_sent += 1
+                      new_seen.append(uid)
+                      # Gentle rate-limit
+                      time.sleep(1.2)
+                  except Exception as e:
+                      # Sendeprobleme einfach überspringen, Workflow soll nicht failen
+                      print(f"[WARN] Send failed for: {title} | {link} -> {e}")
+
+          # Seen speichern (Deckeln, damit Datei klein bleibt)
+          if new_seen:
+              keep = list(seen)[-400:] + new_seen   # ~400 alte + neue
+              seen_file.write_text("\n".join(keep[-600:]), encoding="utf-8")
+
+          print(f"Done. Sent: {total_sent}")
           PY
-      - name: Commit state
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .state || true
-          git commit -m "update last seen post" || echo "no changes"
-          git push
