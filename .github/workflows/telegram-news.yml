@@ -1,13 +1,56 @@
-name: Telegram News Trigger
+name: Telegram News (Actions only)
 
 on:
   schedule:
-    - cron: '0 8 * * *' # täglich um 8:00 UTC = 10/11 Uhr 🇩🇪
+    - cron: '30 7 * * *'   # 09:30 Berlin ~ 07:30 UTC (Sommerzeit)
   workflow_dispatch:
 
 jobs:
-  trigger-n8n:
+  run:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Telegram News Workflow
-        run: curl -X POST ${{ secrets.N8N_WEBHOOK_URL }}
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install feedparser
+      - name: Fetch RSS and post
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, time, urllib.request, urllib.parse, feedparser
+          FEEDS = ["https://the-decoder.de/feed/"]  # ggf. weitere URLs hinzufügen
+          state = pathlib.Path(".state"); state.mkdir(exist_ok=True)
+
+          def send(text):
+            payload = urllib.parse.urlencode({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text})
+            req = urllib.request.Request(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+              data=payload.encode(), headers={"Content-Type":"application/x-www-form-urlencoded"}, method="POST")
+            urllib.request.urlopen(req, timeout=20).read()
+
+          for url in FEEDS:
+            key = pathlib.Path(url.replace("://","_").replace("/","_"))
+            sf = state / f"{key}.last"
+            last = sf.read_text().strip() if sf.exists() else None
+            d = feedparser.parse(url)
+            entries = sorted(d.entries, key=lambda e: e.get("published_parsed") or time.gmtime(0))
+            def eid(e): return e.get("id") or e.get("link")
+            new = [] if last else ([entries[-1]] if entries else [])
+            if last:
+              for e in entries:
+                if eid(e)==last: new=[]   # nur Elemente NACH last
+                else: new.append(e)
+            for e in new:
+              t, l = e.get("title","").strip(), e.get("link","").strip()
+              if t and l: send(f"{t}\n{l}")
+            if entries: sf.write_text(eid(entries[-1]) or "")
+          PY
+      - name: Commit state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .state || true
+          git commit -m "update last seen post" || echo "no changes"
+          git push
