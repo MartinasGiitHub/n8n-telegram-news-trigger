@@ -1,8 +1,8 @@
-name: Telegram AI News
+name: Telegram AI News (DE only)
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # täglich 08:00 UTC = 10/11 Uhr DE
+    - cron: '30 7 * * *'   # 09:30 Berlin (Sommer) / 08:30 (Winter)
   workflow_dispatch:
 
 jobs:
@@ -10,88 +10,88 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install feedparser requests
 
-      # Persistenter Cache für Dublettenvermeidung über Läufe hinweg
-      - name: Restore cache
-        uses: actions/cache@v4
-        with:
-          path: .github/news_state
-          key: telegram-news-cache-v1
-
-      - name: Install deps
-        run: pip install feedparser requests
-
-      - name: Fetch & send
+      - name: Fetch from feeds & post to Telegram (DE only)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - << 'PY'
-          import os, time, html, hashlib, pathlib
+          import os, time, html, pathlib
           import requests, feedparser
 
+          # (URL, Sprache) – DE und EN gepflegt, aber wir posten nur DE
           FEEDS = [
-              "https://the-decoder.de/feed/",
-              "https://t3n.de/news/tag/ki/feed/",
-              "https://venturebeat.com/category/ai/feed/",
-              "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
-              "https://arstechnica.com/ai/feed",
-              "https://ai.googleblog.com/feeds/posts/default",
+            ("https://the-decoder.de/feed/", "DE"),
+            ("https://t3n.de/news/tag/ki/feed/", "DE"),
+            ("https://venturebeat.com/category/ai/feed/", "EN"),
+            ("https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", "EN"),
+            ("https://arstechnica.com/ai/feed", "EN"),
+            ("https://ai.googleblog.com/feeds/posts/default", "EN"),
           ]
+          LANG_WHITELIST = {"DE"}   # <- nur Deutsch; für DE+EN: {"DE","EN"}
 
-          CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
-          TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
-          API_URL  = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+          CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+          TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
+          API_URL = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
-          state_dir = pathlib.Path(".github/news_state"); state_dir.mkdir(parents=True, exist_ok=True)
-          seen_file = state_dir / "seen_urls.txt"
+          state_dir = pathlib.Path(".state"); state_dir.mkdir(exist_ok=True)
+          seen_file = state_dir / "seen_global.txt"
+          seen = set(seen_file.read_text(encoding="utf-8").splitlines()) if seen_file.exists() else set()
 
-          # Gesehene URLs laden (für lauf-übergreifende Dublettenvermeidung)
-          seen = set()
-          if seen_file.exists():
-              for line in seen_file.read_text(encoding="utf-8").splitlines():
-                  if line.strip(): seen.add(line.strip())
-
-          new_seen = []
-
-          # Hilfsfunktionen
           def norm_id(entry):
-              for k in ("id", "guid", "link"): 
-                  if k in entry: 
-                      return str(entry[k])
-              return (entry.get("title","") + "|" + entry.get("link","")).strip()
+              for k in ("id","guid","link"):
+                  if k in entry and entry[k]: return str(entry[k]).strip()
+              return (entry.get("title","")+ "|" + entry.get("link","")).strip()
 
-          def send(title, link):
-              text = f"{html.escape(title)}\n{html.escape(link)}"
-              data = {"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True, "parse_mode": "HTML"}
-              resp = requests.post(API_URL, data=data, timeout=20)
-              resp.raise_for_status()
+          def send(prefix, title, link):
+              text = f"{prefix} {html.escape(title)}\n{html.escape(link)}"
+              data = {
+                "chat_id": CHAT_ID,
+                "text": text,
+                "disable_web_page_preview": True,   # kein großer Link-Vorschau-Block
+                "parse_mode": "HTML"
+              }
+              r = requests.post(API_URL, data=data, timeout=20)
+              r.raise_for_status()
 
-          # Sammeln & Senden – dublettenfrei (über alle Feeds)
-          total_sent = 0
-          for url in FEEDS:
+          total = 0
+          new_ids = []
+          for url, lang in FEEDS:
+              if lang not in LANG_WHITELIST: 
+                  continue
               feed = feedparser.parse(url)
-              # Älteste zuerst, damit Reihenfolge „oben nach neu“ im Kanal stimmt
-              for entry in reversed(feed.entries[:10]):   # pro Feed die letzten 10 prüfen
-                  uid = norm_id(entry)
-                  link = entry.get("link") or ""
-                  if not link or uid in seen: 
+              # ältste → neueste, damit Reihenfolge im Kanal sauber steigt
+              for e in reversed(feed.entries[:12]):
+                  uid  = norm_id(e)
+                  link = (e.get("link") or "").strip()
+                  title= (e.get("title") or "").strip()
+                  if not link or not title or uid in seen:
                       continue
-                  title = entry.get("title", "(ohne Titel)").strip()
                   try:
-                      send(title, link)
-                      total_sent += 1
-                      new_seen.append(uid)
-                      # Gentle rate-limit
+                      prefix = "🇩🇪"
+                      send(prefix, title, link)
+                      total += 1
+                      new_ids.append(uid)
                       time.sleep(1.2)
-                  except Exception as e:
-                      # Sendeprobleme einfach überspringen, Workflow soll nicht failen
-                      print(f"[WARN] Send failed for: {title} | {link} -> {e}")
+                  except Exception as ex:
+                      print(f"[WARN] send failed: {title} | {link} -> {ex}")
 
-          # Seen speichern (Deckeln, damit Datei klein bleibt)
-          if new_seen:
-              keep = list(seen)[-400:] + new_seen   # ~400 alte + neue
-              seen_file.write_text("\n".join(keep[-600:]), encoding="utf-8")
+          if new_ids:
+              # klein halten
+              keep = list(seen)[-600:] + new_ids
+              seen_file.write_text("\n".join(keep[-900:]), encoding="utf-8")
 
-          print(f"Done. Sent: {total_sent}")
+          print(f"Done. Sent: {total}")
           PY
+
+      - name: Commit state (if changed)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .state || true
+          git commit -m "update news state" || echo "no changes"
+          git push
